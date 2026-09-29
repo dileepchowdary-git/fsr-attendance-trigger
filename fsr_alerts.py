@@ -134,6 +134,9 @@ def main():
     ap.add_argument("--force",action="store_true",help="run even on Sunday")
     a=ap.parse_args()
     today=dt.date.today()
+    start=(env.get("START_DATE") or "").strip()
+    if start and not a.force and str(today) < start:
+        print(f"Before START_DATE ({start}) — skipping (today {today})."); return
     if today.weekday()==6 and not a.force:      # Sunday
         print("Sunday — skipping (use --force to override)."); return
     if not (a.morning or a.night):
