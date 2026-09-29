@@ -50,10 +50,17 @@ def punches_today(cur):
     return {r[0]: dict(in_time=r[1], out_time=r[2]) for r in cur.fetchall()}
 
 def completed_visits_today(cur):
-    cur.execute("""SELECT lower(by_user) email, COUNT(*) c FROM meetings
-                   WHERE status='Completed' AND meeting_type='Field Visit'
-                     AND event_at::date = CURRENT_DATE GROUP BY lower(by_user)""")
-    return {r[0]: r[1] for r in cur.fetchall()}
+    """email -> list of (client_name, time_str) for today's Completed field visits."""
+    cur.execute("""SELECT lower(m.by_user) email, l.lead_name,
+                          to_char(m.event_at AT TIME ZONE 'Asia/Kolkata','HH12:MI AM') t
+                   FROM meetings m LEFT JOIN lead l ON l.id=m.client_fk
+                   WHERE m.status='Completed' AND m.meeting_type='Field Visit'
+                     AND m.event_at::date = CURRENT_DATE
+                   ORDER BY m.event_at""")
+    d={}
+    for email, name, t in cur.fetchall():
+        d.setdefault(email, []).append((name or "(unknown client)", t or ""))
+    return d
 
 # ---------------- mail ----------------
 def _send_mailchimp(to, subject, html):
@@ -84,10 +91,56 @@ def send_mail(to, subject, html):
     other=next(p for p in _PROV if p!=primary)
     return _PROV[other](to,subject,html)==202
 
-def html_wrap(name, body):
-    return f"""<div style="font-family:Arial,sans-serif;font-size:14px;color:#222">
-      <p>Hi {name},</p>{body}
-      <p style="color:#888;font-size:12px">— Automated attendance alert, 5C Network</p></div>"""
+def _visits_table(visits):
+    """visits = list of (client_name, time). Returns an HTML block."""
+    if visits is None:
+        return ""
+    if not visits:
+        return ("<p style='margin:18px 0 4px;font-weight:600;color:#1f3355'>Completed field visits today: 0</p>"
+                "<p style='margin:0;color:#8a8f98;font-style:italic'>No completed field visits are recorded for you today.</p>")
+    rows="".join(
+        f"<tr>"
+        f"<td style='padding:8px 12px;border-bottom:1px solid #eef0f3;color:#555;width:34px'>{i+1}</td>"
+        f"<td style='padding:8px 12px;border-bottom:1px solid #eef0f3;color:#222'>{c}</td>"
+        f"<td style='padding:8px 12px;border-bottom:1px solid #eef0f3;color:#555;white-space:nowrap'>{t}</td>"
+        f"</tr>" for i,(c,t) in enumerate(visits))
+    return (f"<p style='margin:18px 0 8px;font-weight:600;color:#1f3355'>Completed field visits today: {len(visits)}</p>"
+            f"<table style='border-collapse:collapse;width:100%;font-size:13px;border:1px solid #eef0f3;border-radius:6px'>"
+            f"<tr style='background:#f4f6f9'>"
+            f"<th style='text-align:left;padding:8px 12px;color:#1f3355;font-size:12px'>#</th>"
+            f"<th style='text-align:left;padding:8px 12px;color:#1f3355;font-size:12px'>Client</th>"
+            f"<th style='text-align:left;padding:8px 12px;color:#1f3355;font-size:12px'>Time</th></tr>"
+            f"{rows}</table>")
+
+def render_email(name, headline, body_html, visits=None, accent="#c0392b"):
+    """Styled attendance-alert email. accent = headline/bar colour."""
+    today = dt.date.today().strftime("%d %b %Y")
+    return f"""\
+<div style="margin:0;padding:24px 0;background:#eef1f5;font-family:'Segoe UI',Arial,sans-serif">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">
+    <table role="presentation" width="600" cellpadding="0" cellspacing="0"
+           style="max-width:600px;width:100%;background:#ffffff;border-radius:10px;overflow:hidden;
+                  box-shadow:0 1px 4px rgba(0,0,0,.08)">
+      <tr><td style="background:#1f3355;padding:18px 28px">
+        <span style="color:#fff;font-size:18px;font-weight:700;letter-spacing:.3px">5C Network</span>
+        <span style="color:#9fb3d1;font-size:13px;float:right;padding-top:4px">Attendance Alert &middot; {today}</span>
+      </td></tr>
+      <tr><td style="height:4px;background:{accent}"></td></tr>
+      <tr><td style="padding:26px 28px 8px">
+        <p style="margin:0 0 14px;font-size:14px;color:#333">Hi {name},</p>
+        <p style="margin:0 0 14px;font-size:16px;font-weight:700;color:{accent}">{headline}</p>
+        <div style="font-size:14px;color:#333;line-height:1.55">{body_html}</div>
+        {_visits_table(visits)}
+      </td></tr>
+      <tr><td style="padding:20px 28px 26px">
+        <div style="border-top:1px solid #eef0f3;padding-top:14px;color:#9298a1;font-size:12px;line-height:1.5">
+          This is an automated attendance alert from the 5C Sales system. If you believe this is an error
+          (e.g. you were on approved leave), please contact your reporting manager.
+        </div>
+      </td></tr>
+    </table>
+  </td></tr></table>
+</div>"""
 
 # ---------------- runs ----------------
 def run_morning(send):
@@ -97,31 +150,38 @@ def run_morning(send):
     print(f"[MORNING] active FSRs={len(fsrs)} | NOT punched in={len(flagged)}")
     for f in flagged:
         subj="Action needed: Punch in before %s" % MORNING_DEADLINE
-        body=(f"<p>Our records show you have <b>not punched in</b> yet today.</p>"
-              f"<p>Please <b>punch in before {MORNING_DEADLINE}</b>. If not, today will be marked as <b>Loss of Pay</b>.</p>")
-        _act(send, f, subj, body)
+        headline=f"Please punch in before {MORNING_DEADLINE}"
+        body=("<p>Our records show you have <b>not punched in</b> yet today.</p>"
+              f"<p>Please punch in before <b>{MORNING_DEADLINE}</b>. If not, today will be "
+              "marked as <b style='color:#c0392b'>Loss of Pay</b>.</p>")
+        _act(send, f, subj, render_email(f["name"], headline, body))
 
 def run_night(send):
     with db() as c, c.cursor() as cur:
         fsrs=active_fsrs(cur); punch=punches_today(cur); visits=completed_visits_today(cur)
     flagged=[]
     for f in fsrs:
-        p=punch.get(f["email"]); v=visits.get(f["email"],0)
-        issues=[]
+        p=punch.get(f["email"]); vlist=visits.get(f["email"], []); v=len(vlist)
+        issues=[]; show_visits=False
         if p and p["in_time"] and not p["out_time"]:
-            issues.append("<p>You punched in but <b>did not punch out</b>. Please <b>punch out</b> now.</p>")
+            issues.append("<p>You punched in today but <b>did not punch out</b>. "
+                          "Please <b>punch out</b> now to close your attendance for the day.</p>")
         if v < MEETING_TARGET:
-            issues.append(f"<p>You completed <b>{v} of {MEETING_TARGET}</b> field visits today. "
-                          f"Completing fewer than {MEETING_TARGET} meetings a day will be marked as <b>Loss of Pay</b>.</p>")
+            issues.append(f"<p>You completed <b>{v} of {MEETING_TARGET}</b> required field visits today. "
+                          f"Completing fewer than {MEETING_TARGET} meetings a day will be marked as "
+                          "<b style='color:#c0392b'>Loss of Pay</b>.</p>")
+            show_visits=True
         if issues:
-            flagged.append((f, v, bool(p and p['in_time'] and not p['out_time'])))
-            _act(send, f, "Action needed: Attendance / meetings for today", "".join(issues))
+            flagged.append(f)
+            html=render_email(f["name"], "Action needed for today's attendance",
+                              "".join(issues), visits=(vlist if show_visits else None))
+            _act(send, f, "Action needed: Attendance / meetings for today", html)
     print(f"[NIGHT] active FSRs={len(fsrs)} | flagged={len(flagged)} "
           f"(no punch-out or <{MEETING_TARGET} visits)")
 
-def _act(send, f, subj, body):
+def _act(send, f, subj, html):
     if send:
-        ok=send_mail(f["email"], subj, html_wrap(f["name"], body))
+        ok=send_mail(f["email"], subj, html)
         print(f"  {'SENT ' if ok else 'FAIL '} {f['name']:<28} {f['email']}")
     else:
         print(f"  WOULD-MAIL  {f['name']:<28} {f['email']}")
