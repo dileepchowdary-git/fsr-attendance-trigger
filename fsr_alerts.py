@@ -31,8 +31,6 @@ MORNING_DEADLINE = env.get("MORNING_DEADLINE", "11:30 AM")
 FROM_EMAIL       = (env.get("FROM_EMAIL") or "insights@5cnetwork.com").strip().strip('"')
 CC_EMAILS        = [e.strip() for e in (env.get("ALERT_CC","") or "").split(",") if e.strip()]
 MAIL_PROVIDER    = (env.get("MAIL_PROVIDER") or "brevo").strip().lower()
-# FSRs to never alert (managers / non-field), comma-separated emails
-EXCLUDE = {e.strip().lower() for e in (env.get("ALERT_EXCLUDE","") or "").split(",") if e.strip()}
 
 def db():
     return psycopg2.connect(dbname=env.get("POSTGRES_DB","yaake"),
@@ -44,7 +42,7 @@ def active_fsrs(cur):
     cur.execute("""SELECT id, name, email FROM users
                    WHERE department_fk=2 AND status='ACTIVE' AND email IS NOT NULL""")
     return [dict(id=r[0], name=r[1], email=r[2].strip().lower())
-            for r in cur.fetchall() if r[2] and r[2].strip().lower() not in EXCLUDE]
+            for r in cur.fetchall() if r[2]]
 
 def punches_today(cur):
     cur.execute("""SELECT lower(email) email, in_time, out_time FROM punching_info
